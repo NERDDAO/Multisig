@@ -4,10 +4,6 @@ pragma solidity ^0.8.9;
 import "./GovToken.sol";
 
 contract MultisigDelegate {
-	using ECDSA for bytes32;
-
-	uin256 public constant votingDuration = 3 days;
-
 	struct Proposal {
 		uint256 id;
 		address by;
@@ -21,6 +17,7 @@ contract MultisigDelegate {
 		bytes32 descriptionHash;
 		//
 		address[] positiveVoters;
+		mapping(address => bool) positiveVoters_hasKey;
 		//
 		bool executed;
 		bool cancelled;
@@ -28,15 +25,6 @@ contract MultisigDelegate {
 		bytes[] results;
 	}
 
-	enum ProposalState {
-		Unfulfilled,
-		Fulfilled,
-		Cancelled,
-		Defeated,
-		Executed
-	}
-
-	mapping(uint256 => Proposal) public proposals;
 	event ProposalCreated(
 		uint256 id,
 		address by,
@@ -52,11 +40,8 @@ contract MultisigDelegate {
 		address indexed by,
 		uint256 time
 	);
-	event ProposalExecuted(
-		uint256 indexed id,
-		address indexed by,
-		uint256 time
-	);
+	event VoteCast(uint256 proposalId, address);
+	event VoteCancelled(uint256 proposalId, address);
 	event CallPerformed(
 		uint256 proposalId,
 		address target,
@@ -65,11 +50,18 @@ contract MultisigDelegate {
 		bytes returnVal,
 		uint256 time
 	);
-
+	event ProposalExecuted(
+		uint256 indexed id,
+		address indexed by,
+		uint256 time
+	);
 	event ExecutorAdded(address);
 	event ExecutorRemoved(address);
 
-	uint256 public quorumPerMillion;
+	uint256 public constant votingDuration = 3 days;
+	mapping(uint256 => Proposal) public proposals;
+
+	uint256 public quorum;
 	uint256 public nonce;
 	uint256 public chainId;
 
@@ -96,14 +88,11 @@ contract MultisigDelegate {
 
 	receive() external payable {}
 
-	constructor(uint256 _chainId, uint256 _quorumPerMillion) {
-		require(
-			_quorumPerMillion > 0,
-			"constructor: must be non-zero sigs required"
-		);
-		quorumPerMillion = _quorumPerMillion;
+	constructor(uint256 _chainId, uint256 _quorum, uint256 govTokenSupply) {
+		require(_quorum > 0, "Quorum cannot be zero");
+		quorum = _quorum;
 		chainId = _chainId;
-		govToken = new WalletGovToken(1000000, msg.sender);
+		govToken = new GovToken(govTokenSupply, msg.sender);
 		executors[msg.sender] = true;
 		emit ExecutorAdded(msg.sender);
 	}
@@ -118,12 +107,8 @@ contract MultisigDelegate {
 		bytes[] memory calldatas,
 		string memory description
 	) external onlyHost returns (uint256 id) {
-		uint256 id = _hashProposal(
-			targets,
-			values,
-			calldatas,
-			keccak256(bytes(description))
-		);
+		bytes32 descriptionHash = keccak256(bytes(description));
+		uint256 id = _hashProposal(targets, values, calldatas, descriptionHash);
 
 		uint256 N = targets.length;
 		require(
@@ -131,20 +116,16 @@ contract MultisigDelegate {
 			"Inconsistent number of calls"
 		);
 
-		address[] memory positiveVoters = new address[];
-		positiveVoters.push(msg.sender);
-		proposals[id] = Proposal({
-			id: id,
-			by: msg.sender,
-			createdAt: block.timestamp,
-			due: block.timestamp + votingDuration,
-			targets: targets,
-			values: values,
-			calldatas: calldatas,
-			descriptionHash: descriptionHash,
-			positiveVoters: positiveVoters,
-			results: new bytes[N]
-		});
+		proposals[id].id = id;
+		proposals[id].by = msg.sender;
+		proposals[id].createdAt = block.timestamp;
+		proposals[id].due = block.timestamp + votingDuration;
+		proposals[id].targets = targets;
+		proposals[id].values = values;
+		proposals[id].calldatas = calldatas;
+		proposals[id].descriptionHash = descriptionHash;
+		proposals[id].positiveVoters.push(msg.sender);
+		proposals[id].positiveVoters_hasKey[msg.sender] = true;
 
 		emit ProposalCreated(
 			id,
@@ -160,19 +141,19 @@ contract MultisigDelegate {
 		return id;
 	}
 
-	function cancel(
+	function cancelProposal(
 		address[] memory targets,
 		uint256[] memory values,
 		bytes[] memory calldatas,
 		bytes32 descriptionHash
 	) external onlyHost returns (uint256) {
-		uint256 id = hashProposal(targets, values, calldatas, descriptionHash);
+		uint256 id = _hashProposal(targets, values, calldatas, descriptionHash);
 
-		ProposalState currentState = state(id);
+		Proposal storage proposal = proposals[id];
 		if (
-			currentState == ProposalState.Executed ||
-			currentState == ProposalState.Defeated ||
-			currentState == ProposalState.Cancelled
+			proposal.executed ||
+			proposal.cancelled ||
+			proposal.due < block.timestamp
 		) revert("Proposal not active");
 
 		proposals[id].cancelled = true;
@@ -182,15 +163,58 @@ contract MultisigDelegate {
 		return id;
 	}
 
+	function castVote(uint256 proposalId) external {
+		Proposal storage proposal = proposals[proposalId];
+
+		if (
+			proposal.executed ||
+			proposal.cancelled ||
+			proposal.due < block.timestamp
+		) revert("Proposal not active");
+
+		if (proposal.positiveVoters_hasKey[msg.sender]) revert("Duplicate");
+
+		proposal.positiveVoters.push(msg.sender);
+		proposal.positiveVoters_hasKey[msg.sender] = true;
+
+		emit VoteCast(proposalId, msg.sender);
+	}
+
+	function cancelVote(uint256 proposalId) external {
+		Proposal storage proposal = proposals[proposalId];
+
+		if (
+			proposal.executed ||
+			proposal.cancelled ||
+			proposal.due < block.timestamp
+		) revert("Proposal not active");
+
+		if (!proposal.positiveVoters_hasKey[msg.sender])
+			revert("You're not in the voters list anyway");
+
+		proposal.positiveVoters.push(msg.sender);
+		proposal.positiveVoters_hasKey[msg.sender] = true;
+
+		emit VoteCancelled(proposalId, msg.sender);
+	}
+
 	function execute(
 		address[] memory targets,
 		uint256[] memory values,
 		bytes[] memory calldatas,
 		bytes32 descriptionHash
-	) external onlyExecutors returns (bytes memory) {
+	) external onlyExecutors {
 		uint256 id = _hashProposal(targets, values, calldatas, descriptionHash);
 
-		if (state(id) != ProposalState.Fulfilled) revert("Not fulfilled");
+		Proposal storage proposal = proposals[id];
+		if (
+			proposal.executed ||
+			proposal.cancelled ||
+			proposal.due < block.timestamp
+		) revert("Proposal not active");
+
+		if (_aggregateWeight(proposal.positiveVoters) < quorum)
+			revert("Not fulfilled");
 
 		uint256 totalValue;
 		for (uint256 i = 0; i < values.length; i++) totalValue += values[i];
@@ -201,22 +225,7 @@ contract MultisigDelegate {
 
 		emit ProposalExecuted(id, msg.sender, block.timestamp);
 
-		_execute(id, targets, values, calldatas, descriptionHash);
-
-		return id;
-	}
-
-	function state(uint256 proposalId) public view returns (ProposalState) {
-		Proposal memory proposal = proposals[proposalId];
-
-		if (proposal.executed) return ProposalState.Executed;
-		if (proposal.cancelled) return ProposalState.Cancelled;
-
-		if (_aggregateWeight(proposal.positiveVoters) >= quorumPerMillion)
-			return ProposalState.Fulfilled;
-		if (proposal.due >= block.timestamp) return ProposalState.Unfulfilled;
-
-		return ProposalState.Defeated;
+		_execute(id, targets, values, calldatas);
 	}
 
 	////////////////// Internal Functions
@@ -226,13 +235,13 @@ contract MultisigDelegate {
 		address[] memory targets,
 		uint256[] memory values,
 		bytes[] memory calldatas
-	) internal view {
+	) internal {
 		for (uint256 i = 0; i < targets.length; ++i) {
 			(bool success, bytes memory returndata) = targets[i].call{
 				value: values[i]
 			}(calldatas[i]);
 			if (!success) revert("Call to target failed");
-			proposals[proposalId].results[i] = returndata;
+			proposals[proposalId].results.push(returndata);
 			emit CallPerformed(
 				proposalId,
 				targets[i],
@@ -259,7 +268,7 @@ contract MultisigDelegate {
 	}
 
 	function _aggregateWeight(
-		address[] positiveVoters
+		address[] memory positiveVoters
 	) internal view returns (uint256 weight) {
 		for (uint256 i = 0; i < positiveVoters.length; i++)
 			weight += govToken.balanceOf(positiveVoters[i]);
@@ -268,30 +277,35 @@ contract MultisigDelegate {
 
 	////////////////// Self-Governed Functions
 
-	function updateQuorumPerMillion(
-		uint256 newQuorumPerMillion
-	) external onlySelf {
-		require(newQuorumPerMillion > 0, "Quorum cannot be zero");
-		quorumPerMillion = newquorumPerMillion;
+	function updateQuorum(uint256 newQuorum) external onlySelf {
+		require(newQuorum > 0, "Quorum cannot be zero");
+		quorum = newQuorum;
 	}
 
 	function addExecutor(address newExecutor) external onlySelf {
+		require(newExecutor != address(0), "Cannot set to zero address");
+		require(newExecutor != address(this), "Cannot set to itself");
+
 		executors[newExecutor] = true;
 		executorCount++;
+
 		emit ExecutorAdded(newExecutor);
 	}
 
 	function removeExecutor(address oldExecutor) external onlySelf {
 		require(executorCount > 1, "Cannot remove the last executor.");
+
 		executors[oldExecutor] = false;
 		executorCount--;
-		emit ExecutorRemoved(newExecutor);
+
+		emit ExecutorRemoved(oldExecutor);
 	}
 
 	function setHost(address newHost) external onlySelf {
 		require(newHost != address(0), "Cannot set to zero address");
 		require(newHost != address(this), "Cannot set to itself");
 		require(newHost != host, "Already the host");
+
 		host = newHost;
 	}
 }
