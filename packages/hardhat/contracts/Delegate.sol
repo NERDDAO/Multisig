@@ -3,7 +3,7 @@ pragma solidity ^0.8.9;
 
 import "./GovToken.sol";
 
-contract MultisigDelegate {
+contract Delegate {
 	struct Proposal {
 		uint256 id;
 		address by;
@@ -62,8 +62,6 @@ contract MultisigDelegate {
 	mapping(uint256 => Proposal) public proposals;
 
 	uint256 public quorum;
-	uint256 public nonce;
-	uint256 public chainId;
 
 	mapping(address => bool) public executors;
 	uint256 public executorCount = 1;
@@ -88,10 +86,10 @@ contract MultisigDelegate {
 
 	receive() external payable {}
 
-	constructor(uint256 _chainId, uint256 _quorum, uint256 govTokenSupply) {
+	constructor(uint256 _quorum, uint256 govTokenSupply) {
 		require(_quorum > 0, "Quorum cannot be zero");
+		require(_quorum < govTokenSupply);
 		quorum = _quorum;
-		chainId = _chainId;
 		govToken = new GovToken(govTokenSupply, msg.sender);
 		executors[msg.sender] = true;
 		emit ExecutorAdded(msg.sender);
