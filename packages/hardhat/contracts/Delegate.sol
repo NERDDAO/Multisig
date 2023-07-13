@@ -2,8 +2,9 @@
 pragma solidity ^0.8.9;
 
 import "./GovToken.sol";
+import "./FunctionConsumer.sol";
 
-contract Delegate {
+contract Delegate is FunctionConsumer {
 	struct Proposal {
 		uint256 id;
 		address by;
@@ -203,17 +204,21 @@ contract Delegate {
 		bytes32 descriptionHash
 	) external onlyExecutors {
 		uint256 id = _hashProposal(targets, values, calldatas, descriptionHash);
-
 		Proposal storage proposal = proposals[id];
-		if (
-			proposal.executed ||
-			proposal.cancelled ||
-			proposal.due < block.timestamp
-		) revert("Proposal not active");
+		// TODO: refactor this function to use Chainlink to verify offchain vote
+		// 1) bring the chf into hardhat run it standalone w the script
+    // 2) import functionConsumer.sol infto multisig
+    // 3) define _useChainlink() in multisig
+    // 4) write test script. 
+    uint256 result = _chainlinkQuery(proposal.id); //<- Uint256
+//NOTE: if the fx fails, whats the return??? 
+   "0x1231 = yay | 01211313 = nay | 0x123123 = abstain| not finished"
+tx start---> chainlink query ---> chainlink result ---> tx continue 
+-------------------------------------------------------> if query = not finished, revert
 
-		if (_aggregateWeight(proposal.positiveVoters) < quorum)
-			revert("Not fulfilled");
-
+if (result == "not finished") revert ("Chainlink query not finished") else if {
+  ( result == "Quorum Not met") revert ("Quorum not met") 
+  // continue normal execution
 		uint256 totalValue;
 		for (uint256 i = 0; i < values.length; i++) totalValue += values[i];
 		if (address(this).balance < totalValue)
@@ -227,6 +232,11 @@ contract Delegate {
 	}
 
 	////////////////// Internal Functions
+	function _chainlink(uint256 proposalId) internal {
+		// todo import chainlink function contract
+		// query = chainlinkFunction for snapshot
+		// usechainlinkFunction(query)
+	}
 
 	function _execute(
 		uint256 proposalId,
